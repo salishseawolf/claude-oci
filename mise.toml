@@ -22,3 +22,40 @@ run="""
   -f Containerfile.rust-wasm \
   -t claude-code:rust-wasm
 """
+
+[tasks.'build:web-gpu']
+depends = ["build"]
+run="""
+  podman build {{ config_root}} \
+  -f Containerfile.web-gpu \
+  -t claude-code:web-gpu
+"""
+
+# Host-side checks for the nested-Podman run profile (README: "Nested Podman
+# and screenshots"). Each starts the image without the hardened
+# --cap-drop/no-new-privileges flags, as that profile requires.
+# label=type:container_engine_t: on SELinux hosts the default container_t
+# policy blocks nested containers from mounting /proc ("crun: mount `proc` to
+# `proc`: Permission denied"). container_engine_t (from container-selinux) is
+# the type meant for container engines inside containers: it allows that
+# while keeping SELinux confinement and per-container MCS categories, unlike
+# label=disable. Hosts without SELinux ignore it.
+# cap-add=SYS_ADMIN: nested Podman runs rootful in the outer container and
+# needs it to mount proc/mqueue/devpts and create namespaces ("crun: mount
+# `mqueue` to `dev/mqueue`: Operation not permitted"). Under rootless Podman the
+# capability is scoped to the user namespace, not host root.
+[tasks.'test:nested']
+description = "Run and build a container inside the base image (fuse-overlayfs storage)"
+depends = ["build"]
+run="""
+  podman run --rm --device /dev/fuse --security-opt label=type:container_engine_t --cap-add=SYS_ADMIN --entrypoint bash claude-code:latest -c \
+    'export CONTAINERS_STORAGE_CONF=/etc/containers/storage-overlay.conf; \
+     podman info --format "storage driver: {{"{{"}}.Store.GraphDriverName{{"}}"}}" && \
+     podman run --rm docker.io/library/alpine sh -c \"echo nested uid_map:; cat /proc/self/uid_map; echo nested-ok\" && \
+     printf "FROM docker.io/library/alpine\\nRUN echo build-ok\\n" | podman build -q -f - /tmp >/dev/null && echo nested-build-ok'
+"""
+
+[tasks.'test:webshot']
+description = "Report which Chromium profiles expose a WebGPU adapter in the web-gpu image"
+depends = ["build:web-gpu"]
+run = "podman run --rm --entrypoint webshot claude-code:web-gpu --probe"

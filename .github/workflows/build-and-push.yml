@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        containerfile: [Containerfile, Containerfile.rust, Containerfile.rust-wasm]
+        containerfile: [Containerfile, Containerfile.rust, Containerfile.rust-wasm, Containerfile.web-gpu]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
       # registry pull instead (confirmed in CI — buildx's `build-contexts`
       # `docker-image://` workaround for this does NOT help: it still
       # resolves via registry rather than the engine's local store). The
-      # base image's `FROM debian:bookworm-slim` is a public image with no
+      # base image's `FROM debian:trixie-slim` is a public image with no
       # such local-chain dependency, so it's the only one of the three that
       # can safely use this builder/cache combo.
       - name: Set up Docker Buildx
@@ -98,6 +98,19 @@ jobs:
       - name: Smoke test the Rust + WASM image
         run: docker run --rm claude-code:rust-wasm --version
 
+      - name: Build the web-gpu image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile.web-gpu
+          load: true
+          tags: claude-code:web-gpu
+
+      - name: Smoke test the web-gpu image
+        run: |
+          docker run --rm claude-code:web-gpu --version
+          docker run --rm --entrypoint chromium claude-code:web-gpu --version
+
       - name: Compute image name
         id: image
         run: |
@@ -130,3 +143,10 @@ jobs:
           docker tag claude-code:rust-wasm ${{ steps.image.outputs.name }}:rust-wasm-${{ github.sha }}
           docker push ${{ steps.image.outputs.name }}:rust-wasm
           docker push ${{ steps.image.outputs.name }}:rust-wasm-${{ github.sha }}
+
+      - name: Tag and push web-gpu image
+        run: |
+          docker tag claude-code:web-gpu ${{ steps.image.outputs.name }}:web-gpu
+          docker tag claude-code:web-gpu ${{ steps.image.outputs.name }}:web-gpu-${{ github.sha }}
+          docker push ${{ steps.image.outputs.name }}:web-gpu
+          docker push ${{ steps.image.outputs.name }}:web-gpu-${{ github.sha }}

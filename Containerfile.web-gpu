@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+
+FROM claude-code:latest
+
+LABEL org.opencontainers.image.source="https://github.com/salishseawolf/claude-oci"
+LABEL org.opencontainers.image.authors="tgwolf@salishseawolf.com"
+LABEL org.opencontainers.image.description="Claude Code CLI with headless Chromium + software WebGPU for screenshotting web/GPU projects"
+
+# Builds on the base image, not rust: projects targeting this variant pin
+# their own toolchains (Rust, trunk, ...) in mise.toml, and the base image
+# already carries the C linker Rust build scripts need.
+#
+# - chromium: headless browser driven by tools/webshot. With no GPU, its
+#   WebGPU runs on the SwiftShader software renderer it bundles
+# - mesa-vulkan-drivers + libvulkan1: Vulkan drivers for a real GPU, used
+#   only when the container gets --device /dev/dri (webshot --profile hardware)
+# - vulkan-tools: `vulkaninfo --summary` for diagnosing adapter problems
+# - fonts-dejavu-core: so screenshots don't render text as boxes
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        chromium fonts-dejavu-core libvulkan1 mesa-vulkan-drivers vulkan-tools && \
+    rm -rf /var/lib/apt/lists/*
+
+# playwright-core only: it drives the system Chromium above instead of
+# downloading its own browsers. NODE_PATH lets webshot `require` the global
+# install.
+ARG PLAYWRIGHT_CORE_VERSION=1.64.1
+RUN npm install -g playwright-core@${PLAYWRIGHT_CORE_VERSION}
+ENV NODE_PATH=/root/.npm-global/lib/node_modules
+
+COPY tools/webshot /usr/local/bin/webshot
+RUN chmod +x /usr/local/bin/webshot
+COPY agents/webshot.md /root/.claude/commands/
+
+# Entrypoint is inherited from base image

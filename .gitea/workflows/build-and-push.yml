@@ -12,7 +12,7 @@ jobs:
     runs-on: debian-12
     strategy:
       matrix:
-        containerfile: [Containerfile, Containerfile.rust, Containerfile.rust-wasm]
+        containerfile: [Containerfile, Containerfile.rust, Containerfile.rust-wasm, Containerfile.web-gpu]
 
     steps:
       - name: Checkout repository
@@ -92,6 +92,18 @@ jobs:
       - name: Smoke test the Rust + WASM image
         run: podman run --rm claude-code:rust-wasm --version
 
+      - name: Build the web-gpu image
+        run: |
+          podman build -f ./Containerfile.web-gpu \
+          -t claude-code:web-gpu \
+          -t claude-code:web-gpu-${{ github.sha }} \
+          .
+
+      - name: Smoke test the web-gpu image
+        run: |
+          podman run --rm claude-code:web-gpu --version
+          podman run --rm --entrypoint chromium claude-code:web-gpu --version
+
       - name: Log in to Gitea Container Registry
         uses: redhat-actions/podman-login@v1
         with:
@@ -118,4 +130,11 @@ jobs:
         with:
           image: claude-code
           tags: rust-wasm rust-wasm-${{ github.sha }}
+          registry: ${{ github.server_url }}
+
+      - name: Push web-gpu image
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: claude-code
+          tags: web-gpu web-gpu-${{ github.sha }}
           registry: ${{ github.server_url }}

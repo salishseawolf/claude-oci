@@ -2,7 +2,7 @@
 
 FROM claude-code:rust
 
-LABEL org.opencontainers.image.source="https://gitea.local.wolfbox.dev/gwolf/claude-oci"
+LABEL org.opencontainers.image.source="https://github.com/salishseawolf/claude-oci"
 LABEL org.opencontainers.image.authors="tgwolf@salishseawolf.com"
 LABEL org.opencontainers.image.description="Claude Code CLI with Rust/Cargo/WASM development environment"
 

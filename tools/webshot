@@ -1,0 +1,203 @@
+#!/usr/bin/env node
+// webshot: screenshot a page in headless Chromium with WebGPU, optionally
+// driving the mouse/keyboard first, and print the page's console output.
+//
+//   webshot URL [options] [actions...]
+//   webshot --probe
+//
+// Options:
+//   --out FILE           PNG path (default: webshot.png)
+//   --size WxH           viewport in CSS px (default: 1280x800)
+//   --wait-console TEXT  wait until a console message contains TEXT
+//   --timeout MS         limit for page load and --wait-console (default: 30000)
+//   --settle MS          pause before the screenshot (default: 500)
+//   --profile NAME       Chromium WebGPU flag profile (default: $WEBSHOT_PROFILE or default)
+//   --probe              report which profiles expose a WebGPU adapter, then exit
+//
+// Actions run in the order given, coordinates in CSS px:
+//   --hover X,Y   --click X,Y   --dblclick X,Y   --drag X1,Y1:X2,Y2
+//   --wheel DY    --key KEY     --wait MS
+//
+// Exits 1 if the page logs an uncaught error or --wait-console times out;
+// the screenshot is still written so the failure can be inspected.
+
+const http = require('node:http');
+const { chromium } = require('playwright-core');
+
+const CHROMIUM = process.env.WEBSHOT_CHROMIUM || '/usr/bin/chromium';
+
+// Named flag sets; `--probe` shows which adapter each one actually gets.
+// Without a GPU, Chromium falls back to its bundled SwiftShader on its own
+// (confirmed with Debian's chromium 155), so `default` needs no GPU flags and
+// `hardware` only differs when the container has --device /dev/dri. The
+// explicit `swiftshader` flags get no adapter under the nested profile's
+// SELinux type container_engine_t, while `default` works under both it and
+// container_t, so `default` is the default.
+const PROFILES = {
+  // Chromium's bundled software Vulkan; works with no GPU.
+  swiftshader: [
+    '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader',
+    '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader',
+  ],
+  // Real GPU through Mesa's Vulkan drivers, when the container was started
+  // with --device /dev/dri.
+  hardware: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist'],
+  // Chromium's own choice.
+  default: ['--enable-unsafe-webgpu'],
+};
+
+function usage(message) {
+  if (message) console.error(`webshot: ${message}`);
+  console.error('usage: webshot URL [--out FILE] [--size WxH] [--wait-console TEXT] [actions...]  |  webshot --probe');
+  process.exit(2);
+}
+
+function point(s) {
+  const [x, y] = s.split(',').map(Number);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) usage(`bad coordinates: ${s}`);
+  return { x, y };
+}
+
+function parseArgs(argv) {
+  const opts = {
+    out: 'webshot.png', width: 1280, height: 800, waitConsole: null, timeout: 30000,
+    settle: 500, profile: process.env.WEBSHOT_PROFILE || 'default', probe: false, url: null, actions: [],
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => (i + 1 < argv.length ? argv[++i] : usage(`${arg} needs a value`));
+    switch (arg) {
+      case '--out': opts.out = next(); break;
+      case '--size': [opts.width, opts.height] = next().split('x').map(Number); break;
+      case '--wait-console': opts.waitConsole = next(); break;
+      case '--timeout': opts.timeout = Number(next()); break;
+      case '--settle': opts.settle = Number(next()); break;
+      case '--profile': opts.profile = next(); break;
+      case '--probe': opts.probe = true; break;
+      case '--hover': opts.actions.push({ kind: 'hover', ...point(next()) }); break;
+      case '--click': opts.actions.push({ kind: 'click', ...point(next()) }); break;
+      case '--dblclick': opts.actions.push({ kind: 'dblclick', ...point(next()) }); break;
+      case '--drag': {
+        const [from, to] = next().split(':');
+        opts.actions.push({ kind: 'drag', from: point(from), to: point(to) });
+        break;
+      }
+      case '--wheel': opts.actions.push({ kind: 'wheel', dy: Number(next()) }); break;
+      case '--key': opts.actions.push({ kind: 'key', key: next() }); break;
+      case '--wait': opts.actions.push({ kind: 'wait', ms: Number(next()) }); break;
+      case '-h': case '--help': usage();
+      default:
+        if (arg.startsWith('--') || opts.url) usage(`unexpected argument: ${arg}`);
+        opts.url = arg;
+    }
+  }
+  if (!PROFILES[opts.profile]) usage(`unknown profile ${opts.profile}; one of ${Object.keys(PROFILES).join(', ')}`);
+  if (!opts.probe && !opts.url) usage('missing URL');
+  return opts;
+}
+
+function launch(profile) {
+  // --no-sandbox: Chromium's sandbox needs user namespaces this container
+  // may not grant. The page is our own dev build, so that's acceptable.
+  return chromium.launch({ executablePath: CHROMIUM, headless: true, args: ['--no-sandbox', ...PROFILES[profile]] });
+}
+
+// navigator.gpu only exists in secure contexts, so probe from a real
+// http://127.0.0.1 page rather than about:blank or a data: URL.
+function blankServer() {
+  return new Promise((resolve) => {
+    const server = http.createServer((_, res) => res.end('<!doctype html><title>probe</title>'));
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+async function probe() {
+  const server = await blankServer();
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  let found = false;
+  for (const name of Object.keys(PROFILES)) {
+    let result;
+    let browser;
+    try {
+      browser = await launch(name);
+      const page = await browser.newPage();
+      await page.goto(url);
+      result = await page.evaluate(async () => {
+        if (!navigator.gpu) return { ok: false, reason: 'navigator.gpu missing' };
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) return { ok: false, reason: 'requestAdapter() returned null' };
+        const { vendor, architecture, device, description } = adapter.info || {};
+        return { ok: true, vendor, architecture, device, description, fallback: adapter.isFallbackAdapter };
+      });
+    } catch (e) {
+      result = { ok: false, reason: e.message.split('\n')[0] };
+    } finally {
+      await browser?.close();
+    }
+    found ||= result.ok;
+    // A "hardware" adapter that is really SwiftShader means no GPU was visible.
+    const note = name === 'hardware' && result.architecture === 'swiftshader' ? '  (software fallback: no GPU visible)' : '';
+    console.log(`${result.ok ? 'OK  ' : 'FAIL'} ${name.padEnd(12)} ${JSON.stringify(result)}${note}`);
+  }
+  server.close();
+  process.exit(found ? 0 : 1);
+}
+
+async function shoot(opts) {
+  const browser = await launch(opts.profile);
+  const page = await browser.newPage({ viewport: { width: opts.width, height: opts.height } });
+  let failed = false;
+  let sawConsole;
+  const seen = new Promise((resolve) => { sawConsole = resolve; });
+
+  page.on('console', (msg) => {
+    console.log(`[console.${msg.type()}] ${msg.text()}`);
+    if (opts.waitConsole && msg.text().includes(opts.waitConsole)) sawConsole();
+  });
+  page.on('pageerror', (err) => {
+    failed = true;
+    console.log(`[pageerror] ${err.message}`);
+  });
+
+  try {
+    await page.goto(opts.url, { timeout: opts.timeout, waitUntil: 'load' });
+    if (opts.waitConsole) {
+      const timedOut = await Promise.race([
+        seen.then(() => false),
+        new Promise((resolve) => setTimeout(() => resolve(true), opts.timeout)),
+      ]);
+      if (timedOut) {
+        failed = true;
+        console.log(`[webshot] timed out after ${opts.timeout} ms waiting for console text: ${opts.waitConsole}`);
+      }
+    }
+    for (const a of opts.actions) {
+      if (a.kind === 'hover') await page.mouse.move(a.x, a.y);
+      else if (a.kind === 'click') await page.mouse.click(a.x, a.y);
+      else if (a.kind === 'dblclick') await page.mouse.dblclick(a.x, a.y);
+      else if (a.kind === 'drag') {
+        await page.mouse.move(a.from.x, a.from.y);
+        await page.mouse.down();
+        await page.mouse.move(a.to.x, a.to.y, { steps: 20 });
+        await page.mouse.up();
+      } else if (a.kind === 'wheel') await page.mouse.wheel(0, a.dy);
+      else if (a.kind === 'key') await page.keyboard.press(a.key);
+      else if (a.kind === 'wait') await page.waitForTimeout(a.ms);
+    }
+    await page.waitForTimeout(opts.settle);
+  } catch (e) {
+    failed = true;
+    console.log(`[webshot] ${e.message.split('\n')[0]}`);
+  } finally {
+    await page.screenshot({ path: opts.out }).catch((e) => console.log(`[webshot] screenshot failed: ${e.message}`));
+    await browser.close();
+  }
+  console.log(`[webshot] wrote ${opts.out}`);
+  process.exit(failed ? 1 : 0);
+}
+
+const opts = parseArgs(process.argv.slice(2));
+(opts.probe ? probe() : shoot(opts)).catch((e) => {
+  console.error(`webshot: ${e.message}`);
+  process.exit(1);
+});
