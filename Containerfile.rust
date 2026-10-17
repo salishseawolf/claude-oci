@@ -2,7 +2,7 @@
 
 FROM claude-code:latest
 
-LABEL org.opencontainers.image.source="https://gitea.local.wolfbox.dev/gwolf/claude-oci"
+LABEL org.opencontainers.image.source="https://github.com/salishseawolf/claude-oci"
 LABEL org.opencontainers.image.authors="tgwolf@salishseawolf.com"
 LABEL org.opencontainers.image.description="Claude Code CLI with Rust/Cargo development environment"
 
@@ -24,7 +24,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     /root/.cargo/bin/rustup default ${RUST_VERSION} && \
     /root/.cargo/bin/rustup component add rustfmt clippy
 
-ENV PATH=/root/.cargo/bin:$PATH
+# Appended, not prepended: mise's shims come first so a project's pinned
+# Rust (mise.toml) wins over this image's default `stable` toolchain in
+# non-interactive shells, which never run `mise activate`.
+ENV PATH=$PATH:/root/.cargo/bin
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 

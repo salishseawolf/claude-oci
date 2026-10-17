@@ -1,19 +1,26 @@
 # syntax=docker/dockerfile:1
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
-LABEL org.opencontainers.image.source="https://gitea.local.wolfbox.dev/gwolf/claude-oci"
+LABEL org.opencontainers.image.source="https://github.com/salishseawolf/claude-oci"
 LABEL org.opencontainers.image.authors="tgwolf@salishseawolf.com"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 1. Install dependencies, Node.js 20.x, Podman (see "Podman config" comment
+# 1. Install dependencies, Node.js 24.x, Podman (see "Podman config" comment
 #    below), and configure npm — one apt-get update/install pass for all of
-#    it, since a second update elsewhere would just re-fetch the same index
+#    it, since a second update elsewhere would just re-fetch the same index.
+#    - gcc + libc6-dev: the host-side C linker every Rust build script needs,
+#      even for projects whose Rust toolchain comes from mise
+#    - uidmap + fuse-overlayfs + passt: nested rootless Podman with the
+#      faster fuse-overlayfs storage when /dev/fuse is passed in (see
+#      entrypoint.sh)
+#    - procps + jq: ps/free and JSON inspection for debugging sessions
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        slirp4netns curl ca-certificates git podman runc && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+        ca-certificates curl fuse-overlayfs gcc git jq libc6-dev passt \
+        crun podman procps slirp4netns uidmap && \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     # set npm prefix to avoid sudo
     mkdir -p /root/.npm-global && \
@@ -44,11 +51,19 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 COPY agents/mise.md /root/.claude/commands/
 
-# Podman config: vfs storage driver + runc, matching the Gitea CI runner, so
+# Podman config: vfs storage driver + crun, close to the Gitea CI runner, so
 # nested builds (e.g. testing this repo's own Containerfiles from inside the
-# running image) work rootless with no extra host capabilities required.
+# running image) work rootless. Nested `podman run` additionally needs the
+# outer-container flags in README's "Nested Podman and screenshots".
 COPY containers/storage.conf /etc/containers/storage.conf
+COPY containers/storage-overlay.conf /etc/containers/storage-overlay.conf
 COPY containers/containers.conf /etc/containers/containers.conf
+# Nested `podman build` RUN steps use chroot isolation instead of a crun
+# container. With the nested profile's SELinux type container_engine_t, crun
+# can't mount the tmpfs buildah uses to mask /sys/devices/virtual/powercap
+# ("mount `tmpfs` to `sys/devices/virtual/powercap`: Permission denied").
+# Same setting as quay.io/podman/stable.
+ENV BUILDAH_ISOLATION=chroot
 
 WORKDIR /workspace
 
