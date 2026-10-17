@@ -266,7 +266,6 @@ For projects where Claude should build/run containers and screenshot the rendere
 ```bash
 podman run -it --rm \
   --hostname claude-code \
-  --init \
   --device /dev/fuse \
   --security-opt label=type:container_engine_t \
   --cap-add=SYS_ADMIN \
@@ -284,6 +283,7 @@ podman run -it --rm \
 
 - Nested containers share this container's network (`netns = "host"` in `containers/containers.conf`), since a private network needs `/dev/net/tun`, and run without cgroups of their own (`cgroups = "disabled"`, using `crun`), since `/sys/fs/cgroup` is read-only here. They therefore get no resource limits of their own; the outer container stays the isolation boundary. Nested `podman build` runs `RUN` steps with `BUILDAH_ISOLATION=chroot`, since `container_engine_t` blocks the tmpfs mount buildah's default isolation uses to mask `/sys/devices/virtual/powercap`.
 - `--security-opt label=type:container_engine_t` runs the container under the SELinux type `container-selinux` provides for container engines inside containers. On SELinux hosts (Fedora, RHEL) the default `container_t` blocks nested containers from mounting `/proc` (``crun: mount `proc` to `proc`: Permission denied``); `container_engine_t` allows it while keeping SELinux confinement and per-container MCS separation. Prefer it over `label=disable`, which also works but leaves the container unconfined (`spc_t`). Hosts without SELinux ignore it.
+- No `--init`: Podman bind-mounts its init binary from the host at `/run/podman-init`, and `container_engine_t` isn't allowed to execute it (``exec container process `/run/podman-init`: Permission denied``). Without it, orphaned processes aren't reaped until the container exits, which is harmless for a session-length container.
 - `--cap-add=SYS_ADMIN` lets nested Podman (rootful inside this container) mount `/dev/mqueue`, `/dev/pts` and `/proc` and set up namespaces. `--privileged` isn't needed.
 - Add `--device /dev/dri` to let WebGPU use the host's real GPU (`webshot --profile hardware`).
 
